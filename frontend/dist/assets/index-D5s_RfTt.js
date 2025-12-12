@@ -9317,13 +9317,11 @@ function WS(e) {
     t.reverse(),
     $m.test(mu(t).function || "") &&
       (t.pop(), $m.test(mu(t).function || "") && t.pop()),
-    t
-      .slice(0, M_)
-      .map((n) => ({
-        ...n,
-        filename: n.filename || mu(t).filename,
-        function: n.function || Wi,
-      }))
+    t.slice(0, M_).map((n) => ({
+      ...n,
+      filename: n.filename || mu(t).filename,
+      function: n.function || Wi,
+    }))
   );
 }
 function mu(e) {
