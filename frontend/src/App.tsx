@@ -300,7 +300,7 @@ function App() {
       console.log("✅ Sentry test error sent! Event ID:", eventId);
 
       // 2. Also trigger backend error for trace correlation
-      const response = await fetch(
+      await fetch(
         `${API_BASE}/v1/download/check?sentry_test=true`,
         {
           method: "POST",
@@ -309,7 +309,6 @@ function App() {
         },
       );
 
-      const data = await response.json();
       addError(
         `✅ Test errors sent to Sentry! Frontend Event ID: ${eventId}`,
         span.spanContext().traceId,
