@@ -31,13 +31,14 @@ When you deploy this service behind a reverse proxy (Cloudflare, nginx, AWS ALB)
 # Start the server (10-120s random delays)
 npm run start
 
-# This request will likely timeout (REQUEST_TIMEOUT_MS=30s)
-curl -X POST http://localhost:3000/v1/download/start \
+# This request demonstrates the problem with synchronous downloads
+# The Export Queue pattern solves this by returning immediately
+curl -X POST http://localhost:3000/v1/export/create \
   -H "Content-Type: application/json" \
-  -d '{"file_id": 70000}'
+  -d '{"file_ids": [70000], "user_id": "demo"}'
 
-# Watch the server logs - you'll see:
-# [Download] Starting file_id=70000 | delay=85.3s (range: 10s-120s) | enabled=true
+# The job is queued and processed in the background
+# Use SSE or polling to track progress
 ```
 
 **Your challenge:** Design solutions that handle these variable processing times gracefully!
@@ -131,9 +132,10 @@ npm run test:e2e
 curl http://localhost:3000/health
 # Expected: {"status":"healthy","checks":{"storage":"ok"}}
 
-curl -X POST http://localhost:3000/v1/download/check \
+# Start an export job (replaces old download check)
+curl -X POST http://localhost:3000/v1/export \
   -H "Content-Type: application/json" \
-  -d '{"file_id": 70000}'
+  -d '{"file_ids": [70000]}'
 ```
 
 ---
@@ -154,23 +156,27 @@ When integrating this service with a frontend application or external services b
 3. **Resource Exhaustion**: Holding HTTP connections open for extended periods consumes server resources
 4. **Retry Storms**: If a client's connection is dropped, they may retry, creating duplicate work
 
-#### Experience the Problem
+#### Experience the Solution
 
 ```bash
 # Start with production delays (10-120 seconds)
 npm run start
 
-# Try to download - this will likely timeout!
-curl -X POST http://localhost:3000/v1/download/start \
+# The Export Queue pattern solves the timeout problem:
+# 1. Create a job (returns immediately)
+curl -X POST http://localhost:3000/v1/export/create \
   -H "Content-Type: application/json" \
-  -d '{"file_id": 70000}'
+  -d '{"file_ids": [70000], "user_id": "test"}'
+# Returns: { "jobId": "...", "sseUrl": "...", "statusUrl": "..." }
 
-# Server logs will show something like:
-# [Download] Starting file_id=70000 | delay=95.2s (range: 10s-120s) | enabled=true
-# But your request times out at 30 seconds (REQUEST_TIMEOUT_MS)
+# 2. Track progress via SSE (real-time updates)
+curl http://localhost:3000/v1/export/progress/<jobId>
+
+# 3. Get download URL when completed
+curl http://localhost:3000/v1/export/download/<jobId>
 ```
 
-#### Your Mission
+#### Your Design Challenge
 
 Write a **complete implementation plan** that addresses how to integrate this download microservice with a fullstack application while handling variable download times gracefully.
 
@@ -191,23 +197,23 @@ Choose and justify ONE of these patterns (or propose your own):
 **Option A: Polling Pattern**
 
 ```
-Client → POST /download/initiate → Returns jobId immediately
-Client → GET /download/status/:jobId (poll every N seconds)
-Client → GET /download/:jobId (when ready)
+Client → POST /v1/export → Returns jobId immediately
+Client → GET /v1/export/:jobId (poll every N seconds)
+Client → GET /v1/export/:jobId/download (when ready)
 ```
 
 **Option B: WebSocket/SSE Pattern**
 
 ```
-Client → POST /download/initiate → Returns jobId
-Client → WS /download/subscribe/:jobId (real-time updates)
+Client → POST /v1/export → Returns jobId
+Client → GET /v1/export/:jobId/progress (real-time updates)
 Server → Pushes progress updates → Client
 ```
 
 **Option C: Webhook/Callback Pattern**
 
 ```
-Client → POST /download/initiate { callbackUrl: "..." }
+Client → POST /v1/export { callbackUrl: "..." }
 Server → Processes download asynchronously
 Server → POST callbackUrl with result when complete
 ```
@@ -511,7 +517,7 @@ DOWNLOAD_DELAY_MAX_MS=200000
 | ------ | ----------------------- | ----------------------------------- |
 | GET    | `/`                     | Welcome message                     |
 | GET    | `/health`               | Health check with storage status    |
-| POST   | `/v1/download/initiate` | Initiate bulk download job          |
+| POST   | `/v1/export`            | Initiate bulk download job          |
 | POST   | `/v1/download/check`    | Check single file availability      |
 | POST   | `/v1/download/start`    | Start download with simulated delay |
 

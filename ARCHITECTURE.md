@@ -2,13 +2,20 @@
 
 ## CUET Micro-Ops Hackathon 2025 - File Download Service
 
-**Version**: 2.0  
+**Version**: 2.1  
 **Date**: December 12, 2025  
 **Author**: Hackathon Team  
-**Status**: ✅ **CHALLENGE 2 COMPLETED**
+**Status**: ✅ **ALL CHALLENGES COMPLETED** (Including Advanced Export System)
 
 ---
 
+> 🚀 **Advanced Export System Implemented**
+>
+> - **Background Jobs**: BullMQ + Redis for reliable processing
+> - **Real-time Updates**: Server-Sent Events (SSE) for progress tracking
+> - **Resilience**: Survives browser disconnects, retries on failure
+> - **Scalability**: Separate worker process, horizontal scaling ready
+>
 > 📊 **Download Processing Time Scenario Implementation**
 > 
 > This architecture handles the variable download processing times shown in the hackathon scenario:
@@ -126,7 +133,7 @@ download_processing_seconds{file_id, status}  - Processing time histogram
   │  Client  │                                                              
   └────┬─────┘                                                              
        │                                                                    
-       │ 1. POST /v1/download/initiate                                      
+       │ 1. POST /v1/export                                      
        │    { file_ids: [70000, 70001] }                                    
        ▼                                                                    
   ┌──────────┐     ┌───────────────┐     ┌───────────────┐                 
@@ -318,9 +325,9 @@ We implement **Option D: Hybrid Approach** combining the best aspects of polling
 
 POLLING PATH:                          SSE PATH:
 ─────────────                          ─────────
-1. POST /v1/download/initiate          1. POST /v1/download/initiate
+1. POST /v1/export                     1. POST /v1/export
 2. Returns: { jobId: "abc" }           2. Returns: { jobId: "abc" }
-3. GET /v1/download/status/abc         3. GET /v1/download/subscribe/abc
+3. GET /v1/export/abc                  3. GET /v1/export/abc/progress
    (every 2-5 seconds)                    (single connection)
 4. Response: {                         4. Server pushes events:
      status: "processing",                event: progress
@@ -386,9 +393,9 @@ job:{jobId}
 user:{userId}:jobs → Set of jobIds
 
 # Job Queue (BullMQ managed)
-bull:downloads:wait    → List of waiting jobs
-bull:downloads:active  → List of active jobs
-bull:downloads:failed  → List of failed jobs
+bull:export-queue:wait    → List of waiting jobs
+bull:export-queue:active  → List of active jobs
+bull:export-queue:failed  → List of failed jobs
 
 # TTL Settings
 ───────────────
@@ -400,7 +407,7 @@ user:{userId}:jobs   → 7 days
 
 ```typescript
 // Worker Configuration
-const downloadQueue = new Queue('downloads', {
+const exportQueue = new Queue('file-exports', {
   connection: redis,
   defaultJobOptions: {
     attempts: 3,
@@ -419,21 +426,25 @@ const downloadQueue = new Queue('downloads', {
 });
 
 // Worker Process
-const worker = new Worker('downloads', async (job) => {
-  const { fileId } = job.data;
+const worker = new Worker('file-exports', async (job) => {
+  const { fileIds, userId } = job.data;
   
   // Update progress during processing
-  await job.updateProgress(10);
-  
-  // Simulate/perform download processing
-  const result = await processDownload(fileId, (progress) => {
-    job.updateProgress(progress);
+  await job.updateProgress({
+    percent: 0,
+    currentFile: 0,
+    totalFiles: fileIds.length,
+    stage: "processing",
+    message: "Starting export..."
   });
+  
+  // Simulate/perform download processing and S3 upload
+  const result = await processExportJob(job);
   
   return result;
 }, {
   connection: redis,
-  concurrency: 5,  // Process 5 jobs simultaneously
+  concurrency: 3,  // Process 3 jobs simultaneously
 });
 ```
 
@@ -493,9 +504,9 @@ Error Categories:
 ├──────────────────────────────────┼───────────┼─────────────────────┤
 │ http_requests_total              │ Counter   │ Total HTTP requests │
 │ http_request_duration_seconds    │ Histogram │ Request latency     │
-│ download_jobs_total              │ Counter   │ Jobs by status      │
-│ download_job_duration_seconds    │ Histogram │ Job processing time │
-│ download_queue_size              │ Gauge     │ Queue depth         │
+│ export_jobs_total                │ Counter   │ Jobs by status      │
+│ export_job_duration_seconds      │ Histogram │ Job processing time │
+│ export_queue_size                │ Gauge     │ Queue depth         │
 │ s3_operations_total              │ Counter   │ S3 ops by type      │
 │ s3_operation_duration_seconds    │ Histogram │ S3 latency          │
 │ active_sse_connections           │ Gauge     │ SSE client count    │
@@ -574,11 +585,11 @@ PHASE 1: Job Initiation
 ───────────────────────
 User                 Nginx               API                  Redis
  │                    │                   │                     │
- │  POST /download/   │                   │                     │
- │  initiate          │                   │                     │
+ │  POST /v1/export   │                   │                     │
+ │                    │                   │                     │
  │───────────────────▶│                   │                     │
  │                    │──────────────────▶│                     │
- │                    │                   │  LPUSH job queue    │
+ │                    │                   │  Add to Queue       │
  │                    │                   │────────────────────▶│
  │                    │                   │                     │
  │                    │                   │  SET job:{id}       │
@@ -613,7 +624,7 @@ PHASE 3: Status Updates (Polling)
 ─────────────────────────────────
 User                 Nginx               API                  Redis
  │                    │                   │                     │
- │  GET /status/:id   │                   │                     │
+ │  GET /v1/export/:id│                   │                     │
  │───────────────────▶│                   │                     │
  │                    │──────────────────▶│                     │
  │                    │                   │  GET job:{id}       │
@@ -628,7 +639,8 @@ PHASE 3 (ALT): Status Updates (SSE)
 ───────────────────────────────────
 User                 Nginx               API                  Redis
  │                    │                   │                     │
- │  GET /subscribe/id │                   │                     │
+ │  GET /v1/export/   │                   │                     │
+ │      :id/progress  │                   │                     │
  │───────────────────▶│                   │                     │
  │                    │──────────────────▶│                     │
  │                    │                   │  SUBSCRIBE job:{id} │
@@ -647,26 +659,22 @@ User                 Nginx               API                  Redis
 
 ```yaml
 # Existing Endpoints (Modified)
-POST /v1/download/initiate
+POST /v1/export
   - Now returns jobId immediately
   - Job queued for background processing
 
 # New Endpoints
-GET /v1/download/status/:jobId
+GET /v1/export/:jobId
   - Poll for job status
   - Returns: { status, progress, downloadUrl?, error? }
 
-GET /v1/download/subscribe/:jobId
+GET /v1/export/:jobId/progress
   - SSE endpoint for real-time updates
   - Events: progress, completed, failed
 
-GET /v1/download/:jobId
+GET /v1/export/:jobId/download
   - Get final download details
   - Returns presigned URL when ready
-
-DELETE /v1/download/:jobId
-  - Cancel a pending/processing job
-  - Returns: { cancelled: boolean }
 
 # Health & Metrics
 GET /metrics
@@ -676,7 +684,7 @@ GET /metrics
 ### API Contract
 
 ```typescript
-// POST /v1/download/initiate
+// POST /v1/export
 // Request
 {
   "file_ids": [70000, 70001, 70002]
@@ -851,7 +859,7 @@ export function useDownload() {
   const initiateDownload = useCallback(async (fileIds: number[]) => {
     setIsLoading(true);
     
-    const response = await fetch('/v1/download/initiate', {
+    const response = await fetch('/v1/export', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ file_ids: fileIds }),
@@ -1047,7 +1055,7 @@ class DownloadManager {
   async initiateMultiple(fileIdGroups: number[][]) {
     const jobs = await Promise.all(
       fileIdGroups.map(fileIds => 
-        fetch('/v1/download/initiate', {
+        fetch('/v1/export', {
           method: 'POST',
           body: JSON.stringify({ file_ids: fileIds }),
         }).then(r => r.json())

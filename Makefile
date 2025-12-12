@@ -16,6 +16,11 @@ help:
 	@echo "  make dev        - Start development environment"
 	@echo "  make prod       - Start production environment"
 	@echo ""
+	@echo "Services:"
+	@echo "  make api        - Start API server only"
+	@echo "  make worker     - Start worker process only"
+	@echo "  make all        - Start all services (API + Worker + Infra)"
+	@echo ""
 	@echo "Management:"
 	@echo "  make stop       - Stop all containers"
 	@echo "  make delete     - Stop and remove all containers + volumes"
@@ -25,6 +30,7 @@ help:
 	@echo "Monitoring:"
 	@echo "  make logs       - View all container logs"
 	@echo "  make logs-api   - View API server logs"
+	@echo "  make logs-worker- View Worker logs"
 	@echo "  make status     - Show container status"
 	@echo ""
 	@echo "Testing:"
@@ -39,6 +45,7 @@ help:
 	@echo "============================================"
 	@echo "  API Docs:    http://localhost:3000/docs"
 	@echo "  Health:      http://localhost:3000/health"
+	@echo "  Worker Metrics: http://localhost:3002/metrics"
 	@echo "  Grafana:     http://localhost:3001 (admin/admin)"
 	@echo "  MinIO:       http://localhost:9001 (minioadmin/minioadmin)"
 	@echo "  Prometheus:  http://localhost:9090"
@@ -64,7 +71,7 @@ build-prod:
 # ============================================
 
 dev:
-	@echo "🚀 Starting development environment..."
+	@echo "🚀 Starting development environment (API + Worker + Infra)..."
 	docker compose -f docker/compose.dev.yml up -d --build
 	@echo ""
 	@echo "✅ Development environment started!"
@@ -72,10 +79,28 @@ dev:
 	@echo "📊 Access URLs:"
 	@echo "   API Docs:    http://localhost:3000/docs"
 	@echo "   Health:      http://localhost:3000/health"
+	@echo "   Worker:      http://localhost:3002/metrics"
 	@echo "   Grafana:     http://localhost:3001"
 	@echo "   MinIO:       http://localhost:9001"
 	@echo "   Prometheus:  http://localhost:9090"
 	@echo "   Jaeger:      http://localhost:16686"
+
+all: dev
+
+api:
+	@echo "🚀 Starting API server only..."
+	docker compose -f docker/compose.dev.yml up -d delineate-app
+	@echo "✅ API server started at http://localhost:3000"
+
+worker:
+	@echo "🚀 Starting worker process only..."
+	docker compose -f docker/compose.dev.yml up -d delineate-worker
+	@echo "✅ Worker started at http://localhost:3002/metrics"
+
+infra:
+	@echo "🚀 Starting infrastructure (Redis, MinIO, Prometheus, etc.)..."
+	docker compose -f docker/compose.dev.yml up -d minio minio-init redis prometheus loki promtail grafana delineate-jaeger
+	@echo "✅ Infrastructure started!"
 
 prod:
 	@echo "🚀 Starting production environment..."
@@ -153,6 +178,10 @@ logs:
 logs-api:
 	@echo "📋 Showing API server logs..."
 	docker logs -f delineate-delineate-app-1
+
+logs-worker:
+	@echo "📋 Showing Worker logs..."
+	docker logs -f delineate-delineate-worker-1
 
 logs-grafana:
 	@echo "📋 Showing Grafana logs..."

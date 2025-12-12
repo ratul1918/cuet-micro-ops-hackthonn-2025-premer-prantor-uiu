@@ -37,7 +37,9 @@ When deployed behind reverse proxies (Cloudflare, nginx, AWS ALB):
 
 ## 🏗️ Architecture Solution Implemented
 
-### Pattern: Hybrid Polling + Async Processing
+### Pattern: Asynchronous Job Queue (BullMQ) + SSE
+
+We implemented a robust **Export System** that decouples the HTTP request from the file processing.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
@@ -55,17 +57,33 @@ When deployed behind reverse proxies (Cloudflare, nginx, AWS ALB):
 │   │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐   │  │
 │   │  │  Hono API   │    │    Redis    │    │   MinIO     │    │  Grafana    │   │  │
 │   │  │  :3000      │◀──▶│   :6379     │    │  :9000/9001 │    │   :3001     │   │  │
-│   │  └──────┬──────┘    └─────────────┘    └─────────────┘    └──────┬──────┘   │  │
-│   │         │                                                        │          │  │
-│   │         │ /metrics                                               │          │  │
-│   │         ▼                                                        ▼          │  │
-│   │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                      │  │
-│   │  │ Prometheus  │───▶│    Loki     │    │   Jaeger    │                      │  │
-│   │  │   :9090     │    │   :3100     │    │  :16686     │                      │  │
-│   │  └─────────────┘    └─────────────┘    └─────────────┘                      │  │
+│   │  └──────┬──────┘    └──────┬──────┘    └─────────────┘    └──────┬──────┘   │  │
+│   │         │                  │                                     │          │  │
+│   │         │ /metrics         ▼                                     │          │  │
+│   │         ▼           ┌─────────────┐                              ▼          │  │
+│   │  ┌─────────────┐    │   Worker    │    ┌─────────────┐                      │  │
+│   │  │ Prometheus  │◀───│   (Node)    │    │    Loki     │                      │  │
+│   │  │   :9090     │    └─────────────┘    │   :3100     │                      │  │
+│   │  └─────────────┘                       └─────────────┘                      │  │
 │   └─────────────────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### 🛡️ Resilience: Handling Browser Disconnects
+
+One of the key requirements is handling users closing their browser during a long download. Our architecture handles this natively:
+
+1.  **Decoupling**: When a user initiates a download (`POST /v1/export`), the API adds a job to the Redis queue and immediately returns a `jobId`.
+2.  **Background Processing**: The **Worker** process picks up the job from Redis. It runs independently of the API and the user's browser connection.
+3.  **Persistence**: If the user closes the browser, the Worker **continues processing** the file (generating, uploading to S3).
+4.  **Reconnection**: When the user returns and checks the status (`GET /v1/export/:jobId`), they will see the job as `completed` (or `processing`) and can download the file.
+
+**Scenario:**
+1. User starts export (Job ID: `abc-123`).
+2. User closes browser tab at 50% progress.
+3. Worker continues processing to 100% and uploads to MinIO.
+4. User comes back 5 minutes later, enters Job ID.
+5. System returns "Completed" and provides the download URL.
 
 ---
 
@@ -75,10 +93,10 @@ When deployed behind reverse proxies (Cloudflare, nginx, AWS ALB):
 
 | File | Purpose |
 |------|---------|
-| [src/index.ts](src/index.ts) | Main API with Prometheus metrics |
-| [docker/compose.dev.yml](docker/compose.dev.yml) | Full Docker stack configuration |
-| [docker/Dockerfile.dev](docker/Dockerfile.dev) | Development container |
-| [.env](.env) | Environment configuration |
+| [src/index.ts](src/index.ts) | Main API (Job Creation, Status, SSE) |
+| [src/worker.ts](src/worker.ts) | Background Worker (File Processing) |
+| [src/queue.ts](src/queue.ts) | Shared BullMQ Queue Configuration |
+| [docker/compose.dev.yml](docker/compose.dev.yml) | Full Docker stack (API + Worker) |
 
 ### Documentation Files
 
@@ -86,26 +104,14 @@ When deployed behind reverse proxies (Cloudflare, nginx, AWS ALB):
 |------|---------|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Complete architecture design document |
 | [QUICKSTART.md](QUICKSTART.md) | Quick start guide |
-| [STACK.md](STACK.md) | Technology stack documentation |
 | [MAKE.md](MAKE.md) | Makefile commands documentation |
-| [Makefile](Makefile) | Docker and dev commands |
 
 ### Observability Configuration
 
 | File | Purpose |
 |------|---------|
-| [docker/config/prometheus/prometheus.yml](docker/config/prometheus/prometheus.yml) | Prometheus scrape config |
+| [docker/config/prometheus/prometheus.yml](docker/config/prometheus/prometheus.yml) | Prometheus scrape config (API + Worker) |
 | [docker/config/grafana/provisioning/dashboards/json/api-overview.json](docker/config/grafana/provisioning/dashboards/json/api-overview.json) | Grafana dashboard |
-| [docker/config/grafana/provisioning/datasources/datasources.yml](docker/config/grafana/provisioning/datasources/datasources.yml) | Grafana data sources |
-| [docker/config/loki/loki-config.yml](docker/config/loki/loki-config.yml) | Loki logging config |
-| [docker/config/promtail/promtail-config.yml](docker/config/promtail/promtail-config.yml) | Promtail log collector |
-
-### API Testing
-
-| File | Purpose |
-|------|---------|
-| [postman/Delineate-API.postman_collection.json](postman/Delineate-API.postman_collection.json) | Postman collection |
-| [postman/Delineate-Local.postman_environment.json](postman/Delineate-Local.postman_environment.json) | Postman environment |
 
 ---
 
@@ -121,92 +127,32 @@ http_requests_total{method, path, status}
 http_request_duration_seconds_bucket{method, path, status, le}
 ```
 
-### Download Metrics
+### Export Job Metrics (Worker)
 
 ```typescript
-// Active downloads gauge
-downloads_active
+// Active export jobs gauge
+export_jobs_active
 
-// Total downloads counter
-downloads_total{status}  // status: "completed" | "failed"
+// Total export jobs counter
+export_jobs_total{status}  // status: "completed" | "failed"
 
-// Download processing time histogram
-download_processing_seconds_bucket{file_id, status, le}
+// Job processing time histogram
+export_job_duration_seconds_bucket{status, le}
 // Buckets: [5, 10, 15, 30, 60, 90, 120] seconds
 ```
-
-### Default Node.js Metrics
-
-```typescript
-// CPU, Memory, Event Loop, GC metrics
-process_cpu_seconds_total
-process_resident_memory_bytes
-nodejs_heap_size_total_bytes
-nodejs_eventloop_lag_seconds
-// ... and more
-```
-
----
-
-## 📈 Grafana Dashboard Panels
-
-The "Delineate API Overview" dashboard includes:
-
-### Download Processing Time Scenario Section
-- 🔄 **Active Downloads** - Gauge showing current processing count
-- ✅ **Completed** - Counter of successful downloads
-- ❌ **Failed** - Counter of failed downloads
-- ⏱️ **Avg Processing Time** - Average time in seconds
-- 📊 **Processing Time Distribution** - Bar chart showing Fast/Medium/Slow
-- ⏳ **Download Progress (P95)** - Gauge with color thresholds
-- 📥 **Download Rate** - Downloads per minute
-
-### HTTP API Metrics Section
-- 📈 **Request Rate** - Requests per second
-- 🚨 **Error Rate** - Percentage of 5xx errors
-- ⚡ **P99 Latency** - 99th percentile response time
-- 📡 **Request Rate by Endpoint** - Breakdown by method/path
-- ⚡ **Response Time Percentiles** - P50, P95, P99
-
-### Application Logs Section
-- 📋 **Download Logs** - Real-time logs from Loki
 
 ---
 
 ## 🌐 API Endpoints
 
-### Download API
+### Export API
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/v1/download/initiate` | Initiate batch download job |
-| `POST` | `/v1/download/check` | Check single file availability |
-| `POST` | `/v1/download/start` | Start download (long-running) |
-
-### System Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/` | Welcome message |
-| `GET` | `/health` | Health check |
-| `GET` | `/metrics` | Prometheus metrics |
-| `GET` | `/docs` | Scalar OpenAPI UI |
-| `GET` | `/openapi` | OpenAPI JSON spec |
-
----
-
-## 🚀 Access URLs
-
-| Service | URL | Credentials |
-|---------|-----|-------------|
-| **API** | http://localhost:3000 | - |
-| **API Docs** | http://localhost:3000/docs | - |
-| **Metrics** | http://localhost:3000/metrics | - |
-| **Grafana** | http://localhost:3001 | admin/admin |
-| **Prometheus** | http://localhost:9090 | - |
-| **MinIO Console** | http://localhost:9001 | minioadmin/minioadmin |
-| **Jaeger UI** | http://localhost:16686 | - |
-| **Loki** | http://localhost:3100 | - |
+| `POST` | `/v1/export` | Initiate batch export job |
+| `GET` | `/v1/export/:jobId` | Poll job status |
+| `GET` | `/v1/export/:jobId/progress` | Real-time progress (SSE) |
+| `GET` | `/v1/export/:jobId/download` | Get final download URL |
 
 ---
 
@@ -215,101 +161,28 @@ The "Delineate API Overview" dashboard includes:
 ### 1. Start the Stack
 
 ```bash
-# Using Make
 make dev
-
-# Or directly
-docker compose -f docker/compose.dev.yml up -d --build
 ```
 
-### 2. Generate Download Metrics
+### 2. Generate Export Job
 
 ```bash
-# Check file availability
-curl -X POST http://localhost:3000/v1/download/check \
+# Start an export job
+curl -X POST http://localhost:3000/v1/export \
   -H "Content-Type: application/json" \
-  -d '{"file_id": 10000}'
-
-# Start a download (5-15s processing time in dev)
-curl -X POST http://localhost:3000/v1/download/start \
-  -H "Content-Type: application/json" \
-  -d '{"file_id": 10000}'
+  -d '{"file_ids": [10000, 20000]}'
 ```
 
 ### 3. View Metrics
 
 ```bash
 # Check Prometheus metrics
-curl http://localhost:3000/metrics | grep -E "download|http_requests"
+curl http://localhost:3000/metrics | grep -E "export|http_requests"
 ```
 
 ### 4. View Grafana Dashboard
 
 Open http://localhost:3001 → Login (admin/admin) → Dashboards → **Delineate API Overview**
-
----
-
-## 📋 Requirements Checklist
-
-- [x] Architecture design document (ARCHITECTURE.md)
-- [x] Docker Compose configuration (NO Kubernetes)
-- [x] Long-running download handling (10-120s)
-- [x] Prometheus metrics integration
-- [x] Grafana dashboard with download scenario visualization
-- [x] Processing time distribution (Fast/Medium/Slow)
-- [x] Active downloads tracking
-- [x] Request rate and latency metrics
-- [x] Error rate monitoring
-- [x] Application logs in Grafana (Loki)
-- [x] Distributed tracing (Jaeger)
-- [x] OpenAPI documentation (Scalar UI)
-- [x] Postman collection with scenario documentation
-
----
-
-## 🔑 Key Design Decisions
-
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| **No Kubernetes** | Docker Compose | Per hackathon rules, simpler for this scale |
-| **Metrics** | prom-client | Native Prometheus client for Node.js |
-| **Logging** | Loki + Promtail | Integrates with Grafana, efficient |
-| **Tracing** | Jaeger + OTEL | Industry standard, visualizes request flow |
-| **Storage** | MinIO | S3-compatible, self-hosted |
-| **Framework** | Hono | Ultra-fast, OpenAPI support |
-
----
-
-## 📊 Metric Queries for Grafana
-
-### Download Processing Distribution
-
-```promql
-# Fast downloads (10-15s)
-sum(increase(download_processing_seconds_bucket{le="15"}[5m]))
-
-# Medium downloads (30-60s)
-sum(increase(download_processing_seconds_bucket{le="60"}[5m])) 
-- sum(increase(download_processing_seconds_bucket{le="15"}[5m]))
-
-# Slow downloads (60-120s)
-sum(increase(download_processing_seconds_bucket{le="120"}[5m])) 
-- sum(increase(download_processing_seconds_bucket{le="60"}[5m]))
-```
-
-### HTTP Metrics
-
-```promql
-# Request rate
-sum(rate(http_requests_total[5m]))
-
-# Error rate percentage
-sum(rate(http_requests_total{status=~"5.."}[5m])) 
-/ sum(rate(http_requests_total[5m])) * 100
-
-# P99 latency
-histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
-```
 
 ---
 
@@ -319,8 +192,8 @@ All architecture design requirements have been implemented:
 
 1. ✅ Complete architecture document with diagrams
 2. ✅ Docker Compose stack (no Kubernetes)
-3. ✅ Prometheus metrics for downloads and HTTP
-4. ✅ Grafana dashboard matching the scenario
-5. ✅ Processing time visualization (Fast/Medium/Slow)
-6. ✅ Real-time monitoring capabilities
+3. ✅ **Resilient Background Processing** (BullMQ + Worker)
+4. ✅ Prometheus metrics for Export Jobs and HTTP
+5. ✅ Grafana dashboard matching the scenario
+6. ✅ Real-time monitoring capabilities (SSE)
 7. ✅ Full observability stack (Prometheus, Loki, Jaeger, Grafana)

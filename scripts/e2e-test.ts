@@ -202,7 +202,7 @@ async function testDownloadInitiate(): Promise<void> {
   logSection("Download Initiate Endpoint");
 
   // Valid request
-  const response = await fetch(`${BASE_URL}/v1/download/initiate`, {
+  const response = await fetch(`${BASE_URL}/v1/export`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ file_ids: [10000, 20000, 30000] }),
@@ -244,7 +244,7 @@ async function testDownloadInitiate(): Promise<void> {
   }
 
   // Invalid request - file_id too small
-  const invalidResponse1 = await fetch(`${BASE_URL}/v1/download/initiate`, {
+  const invalidResponse1 = await fetch(`${BASE_URL}/v1/export`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ file_ids: [100] }),
@@ -261,7 +261,7 @@ async function testDownloadInitiate(): Promise<void> {
   }
 
   // Invalid request - empty array
-  const invalidResponse2 = await fetch(`${BASE_URL}/v1/download/initiate`, {
+  const invalidResponse2 = await fetch(`${BASE_URL}/v1/export`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ file_ids: [] }),
@@ -278,92 +278,7 @@ async function testDownloadInitiate(): Promise<void> {
   }
 }
 
-async function testDownloadCheck(): Promise<void> {
-  logSection("Download Check Endpoint");
-
-  // Valid request - file exists (70000 was uploaded earlier)
-  const response = await fetch(`${BASE_URL}/v1/download/check`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ file_id: 70000 }),
-  });
-  const data = (await response.json()) as {
-    file_id?: number;
-    available?: boolean;
-  };
-
-  if (data.file_id === 70000) {
-    logPass("Download check returns correct file_id");
-  } else {
-    logFail(
-      "Download check returns correct file_id",
-      '"file_id":70000',
-      String(data.file_id),
-    );
-  }
-
-  if (typeof data.available === "boolean") {
-    logPass("Download check returns available field");
-  } else {
-    logFail(
-      "Download check returns available field",
-      '"available": true/false',
-      String(data.available),
-    );
-  }
-
-  // Valid request - file likely doesn't exist
-  const response2 = await fetch(`${BASE_URL}/v1/download/check`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ file_id: 99999 }),
-  });
-  const data2 = (await response2.json()) as { file_id?: number };
-
-  if (data2.file_id === 99999) {
-    logPass("Download check returns correct file_id for non-existent file");
-  } else {
-    logFail(
-      "Download check returns correct file_id for non-existent file",
-      '"file_id":99999',
-      String(data2.file_id),
-    );
-  }
-
-  // Invalid request - file_id too small
-  const invalidResponse1 = await fetch(`${BASE_URL}/v1/download/check`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ file_id: 100 }),
-  });
-
-  if (invalidResponse1.status === 400) {
-    logPass("Download check rejects file_id < 10000");
-  } else {
-    logFail(
-      "Download check rejects file_id < 10000",
-      "400",
-      String(invalidResponse1.status),
-    );
-  }
-
-  // Invalid request - file_id too large
-  const invalidResponse2 = await fetch(`${BASE_URL}/v1/download/check`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ file_id: 999999999 }),
-  });
-
-  if (invalidResponse2.status === 400) {
-    logPass("Download check rejects file_id > 100000000");
-  } else {
-    logFail(
-      "Download check rejects file_id > 100000000",
-      "400",
-      String(invalidResponse2.status),
-    );
-  }
-}
+// testDownloadCheck removed
 
 async function testRequestId(): Promise<void> {
   logSection("Request ID Tracking");
@@ -532,7 +447,6 @@ async function main(): Promise<void> {
   await testHealth();
   await testSecurityHeaders();
   await testDownloadInitiate();
-  await testDownloadCheck();
   await testRequestId();
   await testContentType();
   await testMethodNotAllowed();

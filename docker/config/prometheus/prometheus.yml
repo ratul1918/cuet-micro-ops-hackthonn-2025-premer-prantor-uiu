@@ -52,6 +52,14 @@ scrape_configs:
       - targets: ['delineate-jaeger:14269']
     metrics_path: /metrics
 
+  # Delineate Worker (Export Job Processor)
+  - job_name: 'delineate-worker'
+    static_configs:
+      - targets: ['delineate-worker:3001']
+    metrics_path: /metrics
+    scrape_interval: 10s
+    scrape_timeout: 5s
+
   # Redis (if redis_exporter is added)
   # - job_name: 'redis'
   #   static_configs:

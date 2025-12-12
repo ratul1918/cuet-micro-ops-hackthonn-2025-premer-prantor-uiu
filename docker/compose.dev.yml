@@ -23,6 +23,8 @@ services:
       - S3_SECRET_ACCESS_KEY=minioadmin
       - S3_BUCKET_NAME=downloads
       - S3_FORCE_PATH_STYLE=true
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
     depends_on:
       minio:
         condition: service_healthy
@@ -40,6 +42,44 @@ services:
         labels: "service"
     labels:
       - "service=delineate-app"
+
+  # Background Worker - Export Job Processor
+  delineate-worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+    command: ["node", "--experimental-transform-types", "src/worker.ts"]
+    ports:
+      - "3002:3001"
+    volumes:
+      - ../src:/app/src
+    env_file:
+      - ../.env
+    environment:
+      - NODE_ENV=development
+      - S3_ENDPOINT=http://minio:9000
+      - S3_ACCESS_KEY_ID=minioadmin
+      - S3_SECRET_ACCESS_KEY=minioadmin
+      - S3_BUCKET_NAME=downloads
+      - S3_FORCE_PATH_STYLE=true
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - WORKER_CONCURRENCY=3
+    depends_on:
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - delineate-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service"
+    labels:
+      - "service=delineate-worker"
 
   # =============================================================================
   # DATA LAYER

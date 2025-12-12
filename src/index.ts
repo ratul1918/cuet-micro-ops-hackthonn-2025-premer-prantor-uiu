@@ -11,9 +11,12 @@ import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 import { Scalar } from "@scalar/hono-api-reference";
 import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
+import { streamSSE } from "hono/streaming";
 import { timeout } from "hono/timeout";
 import { rateLimiter } from "hono-rate-limiter";
 import client from "prom-client";
+import { addExportJob, getJobStatus } from "./queue.ts";
+import type { ExportJobProgress, ExportJobResult } from "./queue.ts";
 
 // Helper for optional URL that treats empty string as undefined
 const optionalUrl = z
@@ -95,26 +98,7 @@ const httpRequestDuration = new client.Histogram({
   registers: [register],
 });
 
-const downloadProcessingTime = new client.Histogram({
-  name: 'download_processing_seconds',
-  help: 'Download processing time in seconds',
-  labelNames: ['file_id', 'status'],
-  buckets: [5, 10, 15, 30, 60, 90, 120],
-  registers: [register],
-});
-
-const downloadTotal = new client.Counter({
-  name: 'downloads_total',
-  help: 'Total number of download requests',
-  labelNames: ['status'],
-  registers: [register],
-});
-
-const activeDownloads = new client.Gauge({
-  name: 'downloads_active',
-  help: 'Number of currently active downloads',
-  registers: [register],
-});
+// Unused metrics removed
 
 const app = new OpenAPIHono();
 
@@ -196,14 +180,7 @@ app.get("/metrics", async (c) => {
   return c.body(await register.metrics());
 });
 
-// Error response schema for OpenAPI
-const ErrorResponseSchema = z
-  .object({
-    error: z.string(),
-    message: z.string(),
-    requestId: z.string().optional(),
-  })
-  .openapi("ErrorResponse");
+// ErrorResponseSchema removed
 
 // Error handler with Sentry
 app.onError((err, c) => {
@@ -238,7 +215,77 @@ const HealthResponseSchema = z
   })
   .openapi("HealthResponse");
 
-// Download API Schemas
+// Old Download API Schemas removed
+
+// Old Download Start Response Schema removed
+
+// Export Job Schemas (BullMQ + SSE)
+const ExportCreateRequestSchema = z
+  .object({
+    file_ids: z
+      .array(z.number().int().min(10000).max(100000000))
+      .min(1)
+      .max(1000)
+      .openapi({ description: "Array of file IDs to export (10K to 100M)" }),
+    user_id: z
+      .string()
+      .min(1)
+      .default("anonymous")
+      .openapi({ description: "User ID for tracking exports" }),
+  })
+  .openapi("ExportCreateRequest");
+
+const ExportCreateResponseSchema = z
+  .object({
+    jobId: z.string().openapi({ description: "Unique job identifier" }),
+    status: z.enum(["queued", "processing"]),
+    totalFiles: z.number().int(),
+    message: z.string(),
+    sseUrl: z.string().openapi({ description: "SSE endpoint URL for progress updates" }),
+    statusUrl: z.string().openapi({ description: "Status endpoint URL for polling" }),
+  })
+  .openapi("ExportCreateResponse");
+
+const ExportStatusResponseSchema = z
+  .object({
+    jobId: z.string(),
+    status: z.enum(["waiting", "active", "completed", "failed", "delayed", "not_found"]),
+    progress: z
+      .object({
+        percent: z.number(),
+        currentFile: z.number(),
+        totalFiles: z.number(),
+        stage: z.enum(["queued", "processing", "uploading", "completed", "failed"]),
+        message: z.string(),
+      })
+      .nullable(),
+    result: z
+      .object({
+        s3Key: z.string(),
+        downloadUrl: z.string(),
+        fileSize: z.number(),
+        processedFiles: z.number(),
+        totalFiles: z.number(),
+      })
+      .nullable(),
+    error: z.string().nullable(),
+  })
+  .openapi("ExportStatusResponse");
+
+const ExportDownloadResponseSchema = z
+  .object({
+    jobId: z.string(),
+    status: z.enum(["ready", "pending", "failed", "not_found"]),
+    downloadUrl: z.string().nullable().openapi({ description: "Presigned S3 URL (valid for 1 hour)" }),
+    expiresIn: z.number().nullable().openapi({ description: "URL expiration in seconds" }),
+    message: z.string(),
+  })
+  .openapi("ExportDownloadResponse");
+
+// =============================================================================
+// DOWNLOAD API SCHEMAS (Original Challenge - demonstrates timeout problem)
+// =============================================================================
+
 const DownloadInitiateRequestSchema = z
   .object({
     file_ids: z
@@ -318,9 +365,7 @@ const DownloadStartResponseSchema = z
 
 // Input sanitization for S3 keys - prevent path traversal
 const sanitizeS3Key = (fileId: number): string => {
-  // Ensure fileId is a valid integer within bounds (already validated by Zod)
   const sanitizedId = Math.floor(Math.abs(fileId));
-  // Construct safe S3 key without user-controlled path components
   return `downloads/${String(sanitizedId)}.zip`;
 };
 
@@ -343,56 +388,9 @@ const checkS3Health = async (): Promise<boolean> => {
   }
 };
 
-// S3 availability check
-const checkS3Availability = async (
-  fileId: number,
-): Promise<{
-  available: boolean;
-  s3Key: string | null;
-  size: number | null;
-}> => {
-  const s3Key = sanitizeS3Key(fileId);
+// checkS3Availability removed
 
-  // If no bucket configured, use mock mode
-  if (!env.S3_BUCKET_NAME) {
-    const available = fileId % 7 === 0;
-    return {
-      available,
-      s3Key: available ? s3Key : null,
-      size: available ? Math.floor(Math.random() * 10000000) + 1000 : null,
-    };
-  }
-
-  try {
-    const command = new HeadObjectCommand({
-      Bucket: env.S3_BUCKET_NAME,
-      Key: s3Key,
-    });
-    const response = await s3Client.send(command);
-    return {
-      available: true,
-      s3Key,
-      size: response.ContentLength ?? null,
-    };
-  } catch {
-    return {
-      available: false,
-      s3Key: null,
-      size: null,
-    };
-  }
-};
-
-// Random delay helper for simulating long-running downloads
-const getRandomDelay = (): number => {
-  if (!env.DOWNLOAD_DELAY_ENABLED) return 0;
-  const min = env.DOWNLOAD_DELAY_MIN_MS;
-  const max = env.DOWNLOAD_DELAY_MAX_MS;
-  return Math.floor(Math.random() * (max - min + 1)) + min;
-};
-
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
+// getRandomDelay and sleep removed
 
 // Routes
 const rootRoute = createRoute({
@@ -458,7 +456,47 @@ app.openapi(healthRoute, async (c) => {
   );
 });
 
-// Download API Routes
+// =============================================================================
+// DOWNLOAD API ENDPOINTS (Original - demonstrates timeout problem)
+// =============================================================================
+
+// Random delay helper for simulating long-running downloads
+const getRandomDelay = (): number => {
+  if (!env.DOWNLOAD_DELAY_ENABLED) return 0;
+  const min = env.DOWNLOAD_DELAY_MIN_MS;
+  const max = env.DOWNLOAD_DELAY_MAX_MS;
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+};
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+// Check S3 availability for a file
+const checkS3Availability = async (
+  fileId: number,
+): Promise<{ available: boolean; s3Key: string | null; size: number | null }> => {
+  if (!env.S3_BUCKET_NAME) {
+    return { available: false, s3Key: null, size: null };
+  }
+
+  const s3Key = sanitizeS3Key(fileId);
+  try {
+    const command = new HeadObjectCommand({
+      Bucket: env.S3_BUCKET_NAME,
+      Key: s3Key,
+    });
+    const response = await s3Client.send(command);
+    return {
+      available: true,
+      s3Key,
+      size: response.ContentLength ?? null,
+    };
+  } catch {
+    return { available: false, s3Key: null, size: null };
+  }
+};
+
+// Download Initiate Route
 const downloadInitiateRoute = createRoute({
   method: "post",
   path: "/v1/download/initiate",
@@ -483,25 +521,23 @@ const downloadInitiateRoute = createRoute({
         },
       },
     },
-    400: {
-      description: "Invalid request",
-      content: {
-        "application/json": {
-          schema: ErrorResponseSchema,
-        },
-      },
-    },
-    500: {
-      description: "Internal server error",
-      content: {
-        "application/json": {
-          schema: ErrorResponseSchema,
-        },
-      },
-    },
   },
 });
 
+app.openapi(downloadInitiateRoute, (c) => {
+  const { file_ids } = c.req.valid("json");
+  const jobId = crypto.randomUUID();
+  return c.json(
+    {
+      jobId,
+      status: "queued" as const,
+      totalFileIds: file_ids.length,
+    },
+    200,
+  );
+});
+
+// Download Check Route
 const downloadCheckRoute = createRoute({
   method: "post",
   path: "/v1/download/check",
@@ -533,36 +569,7 @@ const downloadCheckRoute = createRoute({
         },
       },
     },
-    400: {
-      description: "Invalid request",
-      content: {
-        "application/json": {
-          schema: ErrorResponseSchema,
-        },
-      },
-    },
-    500: {
-      description: "Internal server error",
-      content: {
-        "application/json": {
-          schema: ErrorResponseSchema,
-        },
-      },
-    },
   },
-});
-
-app.openapi(downloadInitiateRoute, (c) => {
-  const { file_ids } = c.req.valid("json");
-  const jobId = crypto.randomUUID();
-  return c.json(
-    {
-      jobId,
-      status: "queued" as const,
-      totalFileIds: file_ids.length,
-    },
-    200,
-  );
 });
 
 app.openapi(downloadCheckRoute, async (c) => {
@@ -613,22 +620,6 @@ const downloadStartRoute = createRoute({
         },
       },
     },
-    400: {
-      description: "Invalid request",
-      content: {
-        "application/json": {
-          schema: ErrorResponseSchema,
-        },
-      },
-    },
-    500: {
-      description: "Internal server error",
-      content: {
-        "application/json": {
-          schema: ErrorResponseSchema,
-        },
-      },
-    },
   },
 });
 
@@ -636,35 +627,17 @@ app.openapi(downloadStartRoute, async (c) => {
   const { file_id } = c.req.valid("json");
   const startTime = Date.now();
 
-  // Track active downloads
-  activeDownloads.inc();
-
   // Get random delay and log it
   const delayMs = getRandomDelay();
-  const delaySec = (delayMs / 1000).toFixed(1);
-  const minDelaySec = (env.DOWNLOAD_DELAY_MIN_MS / 1000).toFixed(0);
-  const maxDelaySec = (env.DOWNLOAD_DELAY_MAX_MS / 1000).toFixed(0);
   console.log(
-    `[Download] Starting file_id=${String(file_id)} | delay=${delaySec}s (range: ${minDelaySec}s-${maxDelaySec}s) | enabled=${String(env.DOWNLOAD_DELAY_ENABLED)}`,
+    `[Download] Starting file_id=${String(file_id)} | delay=${(delayMs / 1000).toFixed(1)}s (range: ${String(env.DOWNLOAD_DELAY_MIN_MS / 1000)}s-${String(env.DOWNLOAD_DELAY_MAX_MS / 1000)}s) | enabled=${String(env.DOWNLOAD_DELAY_ENABLED)}`,
   );
 
-  // Simulate long-running download process
+  // Simulate long-running processing
   await sleep(delayMs);
 
-  // Check if file is available in S3
-  const s3Result = await checkS3Availability(file_id);
   const processingTimeMs = Date.now() - startTime;
-  const processingTimeSec = processingTimeMs / 1000;
-
-  // Track download metrics
-  activeDownloads.dec();
-  const status = s3Result.available ? 'completed' : 'failed';
-  downloadTotal.inc({ status });
-  downloadProcessingTime.observe({ file_id: String(file_id), status }, processingTimeSec);
-
-  console.log(
-    `[Download] Completed file_id=${String(file_id)}, actual_time=${String(processingTimeMs)}ms, available=${String(s3Result.available)}`,
-  );
+  const s3Result = await checkS3Availability(file_id);
 
   if (s3Result.available) {
     return c.json(
@@ -691,6 +664,383 @@ app.openapi(downloadStartRoute, async (c) => {
       200,
     );
   }
+});
+
+// =============================================================================
+// EXPORT JOB ENDPOINTS (Background processing with BullMQ)
+// =============================================================================
+
+// POST /v1/export/create - Create a new export job
+const exportCreateRoute = createRoute({
+  method: "post",
+  path: "/v1/export/create",
+  tags: ["Export Jobs"],
+  summary: "Create a new export job",
+  description:
+    "Creates a background job to generate and upload a file to S3. Returns a job ID for tracking progress via polling or SSE.",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: ExportCreateRequestSchema,
+        },
+      },
+    },
+  },
+  responses: {
+    202: {
+      description: "Export job created successfully",
+      content: {
+        "application/json": {
+          schema: ExportCreateResponseSchema,
+        },
+      },
+    },
+  },
+});
+
+app.openapi(exportCreateRoute, async (c) => {
+  const { file_ids, user_id } = c.req.valid("json");
+
+  // Create export job using queue module
+  const job = await addExportJob(user_id, file_ids);
+  const jobId = job.id ?? crypto.randomUUID();
+
+  // Record metric
+  httpRequestsTotal.inc({
+    method: "POST",
+    path: "/v1/export/create",
+    status: "202",
+  });
+
+  console.log(
+    `[Export] Job created job_id=${jobId}, user_id=${user_id}, files=${String(file_ids.length)}`,
+  );
+
+  return c.json(
+    {
+      jobId,
+      status: "queued" as const,
+      totalFiles: file_ids.length,
+      message: "Export job queued for processing",
+      sseUrl: `/v1/export/progress/${jobId}`,
+      statusUrl: `/v1/export/status/${jobId}`,
+    },
+    202,
+  );
+});
+
+// GET /v1/export/status/:jobId - Get job status (polling)
+const exportStatusRoute = createRoute({
+  method: "get",
+  path: "/v1/export/status/{jobId}",
+  tags: ["Export Jobs"],
+  summary: "Get export job status",
+  description: "Returns current status of an export job. Use for polling-based progress tracking.",
+  request: {
+    params: z.object({
+      jobId: z.string().describe("The job ID returned from /v1/export/create"),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Job status retrieved",
+      content: {
+        "application/json": {
+          schema: ExportStatusResponseSchema,
+        },
+      },
+    },
+    404: {
+      description: "Job not found",
+      content: {
+        "application/json": {
+          schema: z.object({
+            error: z.string(),
+            jobId: z.string(),
+          }),
+        },
+      },
+    },
+  },
+});
+
+app.openapi(exportStatusRoute, async (c) => {
+  const { jobId } = c.req.valid("param");
+
+  const status = await getJobStatus(jobId);
+
+  if (status.status === "not_found") {
+    httpRequestsTotal.inc({
+      method: "GET",
+      path: "/v1/export/status/:jobId",
+      status: "404",
+    });
+    return c.json({ error: "Job not found", jobId }, 404);
+  }
+
+  httpRequestsTotal.inc({
+    method: "GET",
+    path: "/v1/export/status/:jobId",
+    status: "200",
+  });
+
+  // Map BullMQ states to our schema
+  const mappedStatus = mapBullMQStatus(status.status);
+
+  return c.json(
+    {
+      jobId,
+      status: mappedStatus,
+      progress: status.progress,
+      result: status.result,
+      error: status.error,
+    },
+    200,
+  );
+});
+
+// Helper function to map BullMQ status to our schema
+function mapBullMQStatus(
+  state: string,
+): "waiting" | "active" | "completed" | "failed" | "delayed" | "not_found" {
+  switch (state) {
+    case "waiting":
+    case "prioritized":
+      return "waiting";
+    case "active":
+      return "active";
+    case "completed":
+      return "completed";
+    case "failed":
+      return "failed";
+    case "delayed":
+      return "delayed";
+    default:
+      return "not_found";
+  }
+}
+
+// GET /v1/export/progress/:jobId - SSE progress stream
+const exportProgressRoute = createRoute({
+  method: "get",
+  path: "/v1/export/progress/{jobId}",
+  tags: ["Export Jobs"],
+  summary: "Stream export progress via SSE",
+  description:
+    "Server-Sent Events stream for real-time progress updates. Survives browser disconnects - reconnect with same job ID to resume.",
+  request: {
+    params: z.object({
+      jobId: z.string().describe("The job ID returned from /v1/export/create"),
+    }),
+  },
+  responses: {
+    200: {
+      description: "SSE stream of progress events",
+      content: {
+        "text/event-stream": {
+          schema: z.string(),
+        },
+      },
+    },
+  },
+});
+
+// SSE progress event interface for streaming
+interface SSEProgressEvent {
+  jobId: string;
+  status: string;
+  progress: ExportJobProgress | null;
+  result: ExportJobResult | null;
+  error: string | null;
+  message: string;
+}
+
+app.openapi(exportProgressRoute, (c) => {
+  const { jobId } = c.req.valid("param");
+
+  httpRequestsTotal.inc({
+    method: "GET",
+    path: "/v1/export/progress/:jobId",
+    status: "200",
+  });
+
+  return streamSSE(c, async (stream) => {
+    let lastPercent = -1;
+    let completed = false;
+    let pollCount = 0;
+    const maxPolls = 600; // 10 minutes max at 1s intervals
+
+    while (!completed && pollCount < maxPolls) {
+      const status = await getJobStatus(jobId);
+
+      if (status.status === "not_found") {
+        await stream.writeSSE({
+          event: "error",
+          data: JSON.stringify({ error: "Job not found", jobId }),
+        });
+        break;
+      }
+
+      const currentPercent = status.progress?.percent ?? 0;
+
+      // Only send updates when progress changes or status changes
+      if (
+        currentPercent !== lastPercent ||
+        status.status === "completed" ||
+        status.status === "failed"
+      ) {
+        const eventData: SSEProgressEvent = {
+          jobId,
+          status: status.status,
+          progress: status.progress,
+          result: status.result,
+          error: status.error,
+          message: getProgressMessage(status.status, status.progress),
+        };
+
+        await stream.writeSSE({
+          event: status.status,
+          data: JSON.stringify(eventData),
+          id: `${jobId}-${String(currentPercent)}`,
+        });
+
+        lastPercent = currentPercent;
+
+        if (status.status === "completed" || status.status === "failed") {
+          completed = true;
+        }
+      }
+
+      if (!completed) {
+        await new Promise((resolve) => setTimeout(resolve, 1000)); // Poll every 1s
+        pollCount++;
+      }
+    }
+
+    if (!completed && pollCount >= maxPolls) {
+      await stream.writeSSE({
+        event: "timeout",
+        data: JSON.stringify({ error: "Progress stream timeout", jobId }),
+      });
+    }
+  });
+});
+
+// Helper function for progress messages
+function getProgressMessage(status: string, progress: ExportJobProgress | null): string {
+  if (!progress) {
+    switch (status) {
+      case "waiting":
+        return "Export job is waiting in queue";
+      case "active":
+        return "Processing export...";
+      case "completed":
+        return "Export completed! Download is ready";
+      case "failed":
+        return "Export failed. Please try again";
+      default:
+        return "Unknown status";
+    }
+  }
+
+  return progress.message;
+}
+
+// GET /v1/export/download/:jobId - Get presigned download URL
+const exportDownloadRoute = createRoute({
+  method: "get",
+  path: "/v1/export/download/{jobId}",
+  tags: ["Export Jobs"],
+  summary: "Get presigned download URL",
+  description:
+    "Returns a short-lived presigned S3 URL for direct download. URL expires in 1 hour. Only available after job completes.",
+  request: {
+    params: z.object({
+      jobId: z.string().describe("The job ID returned from /v1/export/create"),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Download URL retrieved",
+      content: {
+        "application/json": {
+          schema: ExportDownloadResponseSchema,
+        },
+      },
+    },
+    404: {
+      description: "Job not found",
+      content: {
+        "application/json": {
+          schema: z.object({
+            error: z.string(),
+            jobId: z.string(),
+          }),
+        },
+      },
+    },
+    409: {
+      description: "Job not yet completed",
+      content: {
+        "application/json": {
+          schema: z.object({
+            error: z.string(),
+            jobId: z.string(),
+            status: z.string(),
+          }),
+        },
+      },
+    },
+  },
+});
+
+app.openapi(exportDownloadRoute, async (c) => {
+  const { jobId } = c.req.valid("param");
+
+  const status = await getJobStatus(jobId);
+
+  if (status.status === "not_found") {
+    httpRequestsTotal.inc({
+      method: "GET",
+      path: "/v1/export/download/:jobId",
+      status: "404",
+    });
+    return c.json({ error: "Job not found", jobId }, 404);
+  }
+
+  if (status.status !== "completed") {
+    httpRequestsTotal.inc({
+      method: "GET",
+      path: "/v1/export/download/:jobId",
+      status: "409",
+    });
+    return c.json(
+      {
+        error: "Export not yet completed",
+        jobId,
+        status: status.status,
+      },
+      409,
+    );
+  }
+
+  httpRequestsTotal.inc({
+    method: "GET",
+    path: "/v1/export/download/:jobId",
+    status: "200",
+  });
+
+  return c.json(
+    {
+      jobId,
+      status: "ready" as const,
+      downloadUrl: status.result?.downloadUrl ?? null,
+      expiresIn: 3600, // 1 hour
+      message: "Download ready. URL expires in 1 hour.",
+    },
+    200,
+  );
 });
 
 // OpenAPI spec endpoint (disabled in production)

@@ -89,18 +89,23 @@ npm run test:e2e
 
 Expected: All 29 tests should pass.
 
-### 3. Test Download API
+### 3. Test Export API
 
 ```bash
-# Initiate a download job
-curl -X POST http://localhost:3000/v1/download/initiate \
+# Create an export job
+curl -X POST http://localhost:3000/v1/export/create \
   -H "Content-Type: application/json" \
-  -d '{"file_ids": [70000, 70001]}'
+  -d '{"file_ids": [70000, 70001], "user_id": "test"}'
 
-# Check file availability
-curl -X POST http://localhost:3000/v1/download/check \
-  -H "Content-Type: application/json" \
-  -d '{"file_id": 70000}'
+# Response contains jobId, sseUrl, and statusUrl
+# Check status:
+# curl http://localhost:3000/v1/export/status/<jobId>
+
+# Track progress via SSE:
+# curl http://localhost:3000/v1/export/progress/<jobId>
+
+# Get download URL when completed:
+# curl http://localhost:3000/v1/export/download/<jobId>
 ```
 
 ---
