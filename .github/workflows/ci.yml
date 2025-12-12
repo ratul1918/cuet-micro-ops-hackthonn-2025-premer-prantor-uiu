@@ -69,6 +69,11 @@ jobs:
       - name: 📦 Install dependencies
         run: npm ci
 
+      - name: 🐳 Start Services (Redis & MinIO)
+        run: |
+          docker compose -f docker/compose.dev.yml up -d redis minio minio-init
+          sleep 10 # Wait for services to initialize
+
       - name: 🧪 Run E2E tests
         run: npm run test:e2e
         env:
