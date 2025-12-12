@@ -8,6 +8,9 @@ RUN npm install
 
 COPY . .
 
+# Create empty .env if not exists to prevent node --env-file error
+RUN touch .env
+
 EXPOSE 3000
 
 CMD ["npm", "run", "dev"]
