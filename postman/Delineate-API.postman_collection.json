@@ -1,0 +1,391 @@
+{
+  "info": {
+    "_postman_id": "cuet-micro-ops-hackathon-2025",
+    "name": "Delineate Hackathon API",
+    "description": "CUET Micro-Ops Hackathon 2025 - Premer Prantor UIU\n\nThis collection contains all API endpoints for the Delineate file download service.\n\n## Base URL\n- Local: http://localhost:3000\n\n## Challenge 2: Long-Running Download Architecture\nThis API demonstrates handling long-running downloads with variable processing times (5-15s in dev, 10-120s in production).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000",
+      "type": "string"
+    },
+    {
+      "key": "file_id",
+      "value": "10000",
+      "type": "string"
+    },
+    {
+      "key": "jobId",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "General",
+      "item": [
+        {
+          "name": "Root",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/",
+              "host": ["{{baseUrl}}"],
+              "path": [""]
+            },
+            "description": "Returns a welcome message"
+          },
+          "response": []
+        },
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["health"]
+            },
+            "description": "Returns the health status of the service and its dependencies.\n\nExpected response when healthy:\n```json\n{\n  \"status\": \"healthy\",\n  \"checks\": {\n    \"storage\": \"ok\"\n  }\n}\n```"
+          },
+          "response": []
+        },
+        {
+          "name": "Prometheus Metrics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/metrics",
+              "host": ["{{baseUrl}}"],
+              "path": ["metrics"]
+            },
+            "description": "Returns Prometheus metrics for monitoring.\n\nMetrics include:\n- process_cpu_seconds_total\n- process_resident_memory_bytes\n- nodejs_heap_size_total_bytes\n- Custom API metrics"
+          },
+          "response": []
+        },
+        {
+          "name": "OpenAPI Spec",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/openapi",
+              "host": ["{{baseUrl}}"],
+              "path": ["openapi"]
+            },
+            "description": "Returns the OpenAPI 3.0 specification for this API.\n\nNote: Only available in development mode."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Download API",
+      "item": [
+        {
+          "name": "1. Initiate Download Job",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.jobId) {",
+                  "    pm.collectionVariables.set('jobId', jsonData.jobId);",
+                  "    console.log('Saved jobId:', jsonData.jobId);",
+                  "}",
+                  "",
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has jobId', function () {",
+                  "    pm.expect(jsonData).to.have.property('jobId');",
+                  "});",
+                  "",
+                  "pm.test('Status is queued or processing', function () {",
+                  "    pm.expect(['queued', 'processing']).to.include(jsonData.status);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"file_ids\": [10000, 20000, 30000, 40000, 50000]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/download/initiate",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "download", "initiate"]
+            },
+            "description": "Initiates a download job for multiple file IDs.\n\n**Challenge 2 Pattern: Polling**\n\nThis endpoint returns immediately with a jobId, allowing the client to poll for status.\n\n**Request Body:**\n```json\n{\n  \"file_ids\": [10000, 20000, 30000]\n}\n```\n\n**Response:**\n```json\n{\n  \"jobId\": \"uuid\",\n  \"status\": \"queued\",\n  \"totalFileIds\": 3\n}\n```"
+          },
+          "response": []
+        },
+        {
+          "name": "2. Check Download Availability",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "",
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has file_id', function () {",
+                  "    pm.expect(jsonData).to.have.property('file_id');",
+                  "});",
+                  "",
+                  "pm.test('Response has available boolean', function () {",
+                  "    pm.expect(jsonData).to.have.property('available');",
+                  "    pm.expect(typeof jsonData.available).to.equal('boolean');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"file_id\": {{file_id}}\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/download/check",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "download", "check"]
+            },
+            "description": "Checks if a single file ID is available for download in S3.\n\n**Note:** Files must exist in MinIO/S3 storage for `available` to be `true`.\n\n**Request Body:**\n```json\n{\n  \"file_id\": 10000\n}\n```\n\n**Response when available:**\n```json\n{\n  \"file_id\": 10000,\n  \"available\": true,\n  \"s3Key\": \"downloads/10000.zip\",\n  \"size\": 1234567\n}\n```\n\n**Response when not available:**\n```json\n{\n  \"file_id\": 10000,\n  \"available\": false,\n  \"s3Key\": null,\n  \"size\": null\n}\n```"
+          },
+          "response": []
+        },
+        {
+          "name": "2b. Check Download (with Sentry Test)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"file_id\": {{file_id}}\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/download/check?sentry_test=true",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "download", "check"],
+              "query": [
+                {
+                  "key": "sentry_test",
+                  "value": "true"
+                }
+              ]
+            },
+            "description": "Triggers an intentional error for Sentry testing.\n\nThis endpoint will return a 500 error and log to Sentry (if configured).\n\n**Challenge 4: Observability**\nUse this to verify Sentry error tracking is working."
+          },
+          "response": []
+        },
+        {
+          "name": "3. Start Download (Long-Running)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "",
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has status', function () {",
+                  "    pm.expect(jsonData).to.have.property('status');",
+                  "    pm.expect(['completed', 'failed']).to.include(jsonData.status);",
+                  "});",
+                  "",
+                  "pm.test('Response has processingTimeMs', function () {",
+                  "    pm.expect(jsonData).to.have.property('processingTimeMs');",
+                  "    pm.expect(jsonData.processingTimeMs).to.be.above(0);",
+                  "});",
+                  "",
+                  "console.log('Processing time:', jsonData.processingTimeMs, 'ms');",
+                  "console.log('Status:', jsonData.status);",
+                  "console.log('Message:', jsonData.message);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"file_id\": {{file_id}}\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/download/start",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "download", "start"]
+            },
+            "description": "**⚠️ LONG-RUNNING OPERATION**\n\nStarts a file download with simulated processing delay.\n\n**Processing Times:**\n- Development: 5-15 seconds\n- Production: 10-120 seconds\n\n**Challenge 2: Architecture Problem**\n\nThis demonstrates why you need proper architecture for long-running downloads:\n- Cloudflare timeout: 100 seconds\n- nginx default timeout: 60 seconds\n- This request may take up to 120 seconds!\n\n**Request Body:**\n```json\n{\n  \"file_id\": 10000\n}\n```\n\n**Response (success):**\n```json\n{\n  \"file_id\": 10000,\n  \"status\": \"completed\",\n  \"downloadUrl\": \"https://storage.example.com/downloads/10000.zip?token=...\",\n  \"size\": 1234567,\n  \"processingTimeMs\": 12500,\n  \"message\": \"Download ready after 12.5 seconds\"\n}\n```\n\n**Response (file not found):**\n```json\n{\n  \"file_id\": 10000,\n  \"status\": \"failed\",\n  \"downloadUrl\": null,\n  \"size\": null,\n  \"processingTimeMs\": 8500,\n  \"message\": \"File not found after 8.5 seconds of processing\"\n}\n```"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Test Scenarios",
+      "item": [
+        {
+          "name": "Valid File ID (10000)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"file_id\": 10000\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/download/check",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "download", "check"]
+            },
+            "description": "Test with minimum valid file ID"
+          },
+          "response": []
+        },
+        {
+          "name": "Valid File ID (Large - 50000000)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"file_id\": 50000000\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/download/check",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "download", "check"]
+            },
+            "description": "Test with a large valid file ID"
+          },
+          "response": []
+        },
+        {
+          "name": "Invalid File ID (Too Small)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"file_id\": 999\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/download/check",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "download", "check"]
+            },
+            "description": "Test validation - file_id must be >= 10000\n\nExpected: 400 Bad Request"
+          },
+          "response": []
+        },
+        {
+          "name": "Invalid File ID (Too Large)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"file_id\": 999999999\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/download/check",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "download", "check"]
+            },
+            "description": "Test validation - file_id must be <= 100000000\n\nExpected: 400 Bad Request"
+          },
+          "response": []
+        },
+        {
+          "name": "Batch Download (Multiple Files)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"file_ids\": [\n    10000,\n    10001,\n    10002,\n    10003,\n    10004,\n    10005,\n    10006,\n    10007,\n    10008,\n    10009\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/download/initiate",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "download", "initiate"]
+            },
+            "description": "Test batch download initiation with 10 files"
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

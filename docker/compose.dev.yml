@@ -85,7 +85,12 @@ services:
       mc alias set myminio http://minio:9000 minioadmin minioadmin;
       mc mb myminio/downloads --ignore-existing;
       mc anonymous set download myminio/downloads;
-      echo 'Bucket downloads created successfully';
+      echo 'Creating test files for downloads...';
+      for i in 10000 10001 10002 10003 10004 10005 10006 10007 10008 10009 10010 20000 30000 40000 50000 70000; do
+        echo 'Test file content for file ID: '$$i > /tmp/testfile.txt;
+        mc cp /tmp/testfile.txt myminio/downloads/downloads/$$i.zip;
+      done;
+      echo 'Bucket downloads created with test files successfully';
       exit 0;
       "
     networks:

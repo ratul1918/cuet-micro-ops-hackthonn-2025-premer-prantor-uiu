@@ -13,6 +13,7 @@ import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
 import { timeout } from "hono/timeout";
 import { rateLimiter } from "hono-rate-limiter";
+import client from "prom-client";
 
 // Helper for optional URL that treats empty string as undefined
 const optionalUrl = z
@@ -74,6 +75,10 @@ const otelSDK = new NodeSDK({
 });
 otelSDK.start();
 
+// Initialize Prometheus metrics
+const register = new client.Registry();
+client.collectDefaultMetrics({ register });
+
 const app = new OpenAPIHono();
 
 // Request ID middleware - adds unique ID to each request
@@ -131,6 +136,12 @@ app.use(
     dsn: env.SENTRY_DSN,
   }),
 );
+
+// Prometheus metrics endpoint
+app.get("/metrics", async (c) => {
+  c.header("Content-Type", register.contentType);
+  return c.body(await register.metrics());
+});
 
 // Error response schema for OpenAPI
 const ErrorResponseSchema = z
