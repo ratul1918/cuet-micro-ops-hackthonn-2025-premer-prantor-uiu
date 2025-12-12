@@ -175,6 +175,7 @@ jobs:
         continue-on-error: true
 
       - name: 📋 Extract Docker metadata
+        if: steps.check_secrets.outputs.has_secrets == 'true'
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -185,6 +186,7 @@ jobs:
             type=ref,event=branch
 
       - name: 🚀 Build and Push to Docker Hub
+        if: steps.check_secrets.outputs.has_secrets == 'true'
         id: docker_build
         uses: docker/build-push-action@v6
         with:
@@ -201,6 +203,7 @@ jobs:
             VCS_REF=${{ github.sha }}
 
       - name: 📋 Image Summary
+        if: steps.check_secrets.outputs.has_secrets == 'true'
         run: |
           echo "## 🐳 Docker Image Published" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
