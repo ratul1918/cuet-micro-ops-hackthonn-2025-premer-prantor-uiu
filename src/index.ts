@@ -61,11 +61,11 @@ const s3Client = new S3Client({
   ...(env.S3_ENDPOINT && { endpoint: env.S3_ENDPOINT }),
   ...(env.S3_ACCESS_KEY_ID &&
     env.S3_SECRET_ACCESS_KEY && {
-      credentials: {
-        accessKeyId: env.S3_ACCESS_KEY_ID,
-        secretAccessKey: env.S3_SECRET_ACCESS_KEY,
-      },
-    }),
+    credentials: {
+      accessKeyId: env.S3_ACCESS_KEY_ID,
+      secretAccessKey: env.S3_SECRET_ACCESS_KEY,
+    },
+  }),
   forcePathStyle: env.S3_FORCE_PATH_STYLE,
 });
 
@@ -121,7 +121,7 @@ app.use(async (c, next) => {
   const path = c.req.path;
   const method = c.req.method;
   const status = String(c.res.status);
-  
+
   // Skip metrics endpoint to avoid recursion
   if (path !== '/metrics') {
     httpRequestsTotal.inc({ method, path, status });
@@ -134,7 +134,7 @@ app.use(
   cors({
     origin: env.CORS_ORIGINS,
     allowMethods: ["GET", "POST", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization", "X-Request-ID"],
+    allowHeaders: ["Content-Type", "Authorization", "X-Request-ID", "traceparent", "baggage"],
     exposeHeaders: [
       "X-Request-ID",
       "X-RateLimit-Limit",
@@ -220,13 +220,13 @@ const addLog = (level: LogEntry['level'], message: string, metadata?: Record<str
 app.use(async (c, next) => {
   const start = Date.now();
   const traceId = c.req.header('traceparent')?.split('-')[1];
-  
+
   await next();
-  
+
   const duration = Date.now() - start;
   const level = c.res.status >= 500 ? 'error' : c.res.status >= 400 ? 'warn' : 'info';
-  
-  addLog(level, `${c.req.method} ${c.req.path} - ${c.res.status} (${duration}ms)`, {
+
+  addLog(level, `${c.req.method} ${c.req.path} - ${String(c.res.status)} (${String(duration)}ms)`, {
     method: c.req.method,
     path: c.req.path,
     status: c.res.status,
@@ -237,21 +237,21 @@ app.use(async (c, next) => {
 
 // Logs API endpoint
 app.get("/api/logs", (c) => {
-  const limit = Math.min(Number(c.req.query('limit') || 100), MAX_LOGS);
+  const limit = Math.min(Number(c.req.query('limit') ?? 100), MAX_LOGS);
   const level = c.req.query('level');
   const since = c.req.query('since');
-  
+
   let filteredLogs = logsStore;
-  
+
   if (level) {
     filteredLogs = filteredLogs.filter(log => log.level === level);
   }
-  
+
   if (since) {
     const sinceDate = new Date(since);
     filteredLogs = filteredLogs.filter(log => new Date(log.timestamp) > sinceDate);
   }
-  
+
   return c.json({
     logs: filteredLogs.slice(0, limit),
     total: filteredLogs.length,
@@ -260,9 +260,9 @@ app.get("/api/logs", (c) => {
 });
 
 // SSE endpoint for real-time log streaming
-app.get("/api/logs/stream", async (c) => {
+app.get("/api/logs/stream", (c) => {
   let lastLogId = '';
-  
+
   return streamSSE(c, async (stream) => {
     // Send existing logs first
     for (const log of logsStore.slice(0, 50).reverse()) {
@@ -273,17 +273,17 @@ app.get("/api/logs/stream", async (c) => {
       });
       lastLogId = log.id;
     }
-    
+
     // Then poll for new logs
     while (true) {
       await stream.sleep(1000);
-      
+
       const newLogs = logsStore.filter(log => {
         const lastIndex = logsStore.findIndex(l => l.id === lastLogId);
         const currentIndex = logsStore.indexOf(log);
-        return lastIndex === -1 || currentIndex < lastIndex;
+        return currentIndex < lastIndex;
       });
-      
+
       for (const log of newLogs.reverse()) {
         await stream.writeSSE({
           data: JSON.stringify(log),
@@ -302,13 +302,13 @@ app.get("/api/logs/stream", async (c) => {
 app.onError((err, c) => {
   c.get("sentry").captureException(err);
   const requestId = c.get("requestId") as string | undefined;
-  
+
   // Log error to our store
   addLog('error', `Error: ${err.message}`, {
     stack: err.stack,
     requestId,
   });
-  
+
   return c.json(
     {
       error: "Internal Server Error",
